@@ -1,6 +1,8 @@
 <%+cbi/valueheader%>
 <%
 local dsp = require "luci.dispatcher"
+local api = require "luci.model.cbi.passwall.api.api"
+
 -%>
 <script type="text/javascript">//<![CDATA[
 	function padright(str, cnt, pad) {
@@ -312,6 +314,8 @@ local dsp = require "luci.dispatcher"
 			if (ploc > 0) {
 				url0 = sstr.substr(0, ploc);
 				param = sstr.substr(ploc + 2);
+			} else {
+				var url0 = sstr;
 			}
 			console.log(param);
 			var ssm = url0.match(/^(.+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]+)/);
@@ -555,6 +559,9 @@ local dsp = require "luci.dispatcher"
 			var sstr = b64DecodeUnicode(ssu[1]);
 			var ploc = sstr.indexOf("/?");
 			opt.set('type', "V2ray");
+			<% if api.is_finded("xray") then -%>
+				opt.set('type', "Xray");
+			<% end -%>
 			opt.get('type').dispatchEvent(event);
 			var url0, param = "";
 			if (ploc > 0) {
