@@ -6,7 +6,8 @@ if not api.finded_com("xray") then
 	return
 end
 
-local appname = api.appname
+local appname = "passwall"
+local jsonc = api.jsonc
 local uci = api.uci
 
 local type_name = "Xray"
@@ -17,7 +18,7 @@ local function option_name(name)
 	return option_prefix .. name
 end
 
-local x_ss_encrypt_method_list = {
+local ss_method_list = {
 	"aes-128-gcm", "aes-256-gcm", "chacha20-poly1305", "xchacha20-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"
 }
 
@@ -27,6 +28,7 @@ local header_type_list = {
 	"none", "srtp", "utp", "wechat-video", "dtls", "wireguard"
 }
 
+local xray_version = api.get_app_version("xray")
 -- [[ Xray ]]
 
 s.fields["type"]:value(type_name, "Xray")
@@ -41,7 +43,7 @@ o:value("trojan", translate("Trojan"))
 o:value("wireguard", translate("WireGuard"))
 o:value("_balancing", translate("Balancing"))
 o:value("_shunt", translate("Shunt"))
-o:value("_iface", translate("Custom Interface") .. " (Only Support Xray)")
+o:value("_iface", translate("Custom Interface"))
 
 o = s:option(Value, option_name("iface"), translate("Interface"))
 o.default = "eth1"
@@ -49,75 +51,140 @@ o:depends({ [option_name("protocol")] = "_iface" })
 
 local nodes_table = {}
 local balancers_table = {}
+local fallback_table = {}
 local iface_table = {}
+local is_balancer = nil
 for k, e in ipairs(api.get_valid_nodes()) do
 	if e.node_type == "normal" then
 		nodes_table[#nodes_table + 1] = {
 			id = e[".name"],
-			remarks = e["remark"]
+			remark = e["remark"],
+			type = e["type"]
 		}
 	end
 	if e.protocol == "_balancing" then
 		balancers_table[#balancers_table + 1] = {
 			id = e[".name"],
-			remarks = e["remark"]
+			remark = e["remark"]
 		}
+		if e[".name"] ~= arg[1] then
+			fallback_table[#fallback_table + 1] = {
+				id = e[".name"],
+				remark = e["remark"],
+				fallback = e["fallback_node"]
+			}
+		else
+			is_balancer = true
+		end
 	end
 	if e.protocol == "_iface" then
 		iface_table[#iface_table + 1] = {
 			id = e[".name"],
-			remarks = e["remark"]
+			remark = e["remark"]
 		}
 	end
 end
 
+local socks_list = {}
+uci:foreach(appname, "socks", function(s)
+	if s.enabled == "1" and s.node then
+		socks_list[#socks_list + 1] = {
+			id = "Socks_" .. s[".name"],
+			remark = translate("Socks Config") .. " " .. string.format("[%s %s]", s.port, translate("Port"))
+		}
+	end
+end)
+
 -- 负载均衡列表
 local o = s:option(DynamicList, option_name("balancing_node"), translate("Load balancing node list"), translate("Load balancing node list, <a target='_blank' href='https://toutyrater.github.io/routing/balance2.html'>document</a>"))
 o:depends({ [option_name("protocol")] = "_balancing" })
-for k, v in pairs(nodes_table) do o:value(v.id, v.remarks) end
+for k, v in pairs(nodes_table) do o:value(v.id, v.remark) end
 
 local o = s:option(ListValue, option_name("balancingStrategy"), translate("Balancing Strategy"))
 o:depends({ [option_name("protocol")] = "_balancing" })
 o:value("random")
+o:value("roundRobin")
 o:value("leastPing")
-o.default = "random"
+o.default = "leastPing"
+
+-- Fallback Node
+if api.compare_versions(xray_version, ">=", "1.8.10") then
+	local o = s:option(ListValue, option_name("fallback_node"), translate("Fallback Node"))
+	if api.compare_versions(xray_version, ">=", "1.8.12") then
+		o:depends({ [option_name("protocol")] = "_balancing" })
+	else
+		o:depends({ [option_name("balancingStrategy")] = "leastPing" })
+	end
+	local function check_fallback_chain(fb)
+		for k, v in pairs(fallback_table) do
+			if v.fallback == fb then
+				fallback_table[k] = nil
+				check_fallback_chain(v.id)
+			end
+		end
+	end
+	-- 检查fallback链，去掉会形成闭环的balancer节点
+	if is_balancer then
+		check_fallback_chain(arg[1])
+	end
+	for k, v in pairs(fallback_table) do o:value(v.id, v.remark) end
+	for k, v in pairs(nodes_table) do o:value(v.id, v.remark) end
+end
 
 -- 探测地址
-local o = s:option(Flag, option_name("useCustomProbeUrl"), translate("Use Custome Probe URL"), translate("By default the built-in probe URL will be used, enable this option to use a custom probe URL."))
-o:depends({ [option_name("balancingStrategy")] = "leastPing" })
+local ucpu = s:option(Flag, option_name("useCustomProbeUrl"), translate("Use Custome Probe URL"), translate("By default the built-in probe URL will be used, enable this option to use a custom probe URL."))
+ucpu:depends({ [option_name("balancingStrategy")] = "leastPing" })
 
-local o = s:option(Value, option_name("probeUrl"), translate("Probe URL"))
-o:depends({ [option_name("useCustomProbeUrl")] = true })
-o.default = "https://www.google.com/generate_204"
-o.description = translate("The URL used to detect the connection status.")
+local pu = s:option(Value, option_name("probeUrl"), translate("Probe URL"))
+pu:depends({ [option_name("useCustomProbeUrl")] = true })
+pu:value("https://cp.cloudflare.com/", "Cloudflare")
+pu:value("https://www.gstatic.com/generate_204", "Gstatic")
+pu:value("https://www.google.com/generate_204", "Google")
+pu:value("https://www.youtube.com/generate_204", "YouTube")
+pu:value("https://connect.rom.miui.com/generate_204", "MIUI (CN)")
+pu:value("https://connectivitycheck.platform.hicloud.com/generate_204", "HiCloud (CN)")
+pu.default = "https://www.google.com/generate_204"
+pu.description = translate("The URL used to detect the connection status.")
 
 -- 探测间隔
-local o = s:option(Value, option_name("probeInterval"), translate("Probe Interval"))
-o:depends({ [option_name("balancingStrategy")] = "leastPing" })
-o.default = "1m"
-o.description = translate("The interval between initiating probes. Every time this time elapses, a server status check is performed on a server. The time format is numbers + units, such as '10s', '2h45m', and the supported time units are <code>ns</code>, <code>us</code>, <code>ms</code>, <code>s</code>, <code>m</code>, <code>h</code>, which correspond to nanoseconds, microseconds, milliseconds, seconds, minutes, and hours, respectively.")
+local pi = s:option(Value, option_name("probeInterval"), translate("Probe Interval"))
+pi:depends({ [option_name("balancingStrategy")] = "leastPing" })
+pi.default = "1m"
+pi.description = translate("The interval between initiating probes. Every time this time elapses, a server status check is performed on a server. The time format is numbers + units, such as '10s', '2h45m', and the supported time units are <code>ns</code>, <code>us</code>, <code>ms</code>, <code>s</code>, <code>m</code>, <code>h</code>, which correspond to nanoseconds, microseconds, milliseconds, seconds, minutes, and hours, respectively.")
+
+if api.compare_versions(xray_version, ">=", "1.8.12") then
+	ucpu:depends({ [option_name("protocol")] = "_balancing" })
+	pi:depends({ [option_name("protocol")] = "_balancing" })
+else
+	ucpu:depends({ [option_name("balancingStrategy")] = "leastPing" })
+	pi:depends({ [option_name("balancingStrategy")] = "leastPing" })
+end
+
 
 -- [[ 分流模块 ]]
 if #nodes_table > 0 then
 	o = s:option(Flag, option_name("preproxy_enabled"), translate("Preproxy"))
 	o:depends({ [option_name("protocol")] = "_shunt" })
 
-	o = s:option(Value, option_name("main_node"), string.format('<a style="color:red">%s</a>', translate("Preproxy Node")), translate("Set the node to be used as a pre-proxy. Each rule (including <code>Default</code>) has a separate switch that controls whether this rule uses the pre-proxy or not."))
+	o = s:option(ListValue, option_name("main_node"), string.format('<a style="color:red">%s</a>', translate("Preproxy Node")), translate("Set the node to be used as a pre-proxy. Each rule (including <code>Default</code>) has a separate switch that controls whether this rule uses the pre-proxy or not."))
 	o:depends({ [option_name("protocol")] = "_shunt", [option_name("preproxy_enabled")] = true })
+	for k, v in pairs(socks_list) do
+		o:value(v.id, v.remark)
+	end
 	for k, v in pairs(balancers_table) do
-		o:value(v.id, v.remarks)
+		o:value(v.id, v.remark)
 	end
 	for k, v in pairs(iface_table) do
-		o:value(v.id, v.remarks)
+		o:value(v.id, v.remark)
 	end
 	for k, v in pairs(nodes_table) do
-		o:value(v.id, v.remarks)
+		o:value(v.id, v.remark)
 	end
 	o.default = "nil"
 end
 uci:foreach(appname, "shunt_rules", function(e)
 	if e[".name"] and e.remarks then
-		o = s:option(Value, option_name(e[".name"]), string.format('* <a href="%s" target="_blank">%s</a>', api.url("shunt_rules", e[".name"]), e.remarks))
+		o = s:option(ListValue, option_name(e[".name"]), string.format('* <a href="%s" target="_blank">%s</a>', api.url("shunt_rules", e[".name"]), e.remarks))
 		o:value("nil", translate("Close"))
 		o:value("_default", translate("Default"))
 		o:value("_direct", translate("Direct Connection"))
@@ -125,18 +192,21 @@ uci:foreach(appname, "shunt_rules", function(e)
 		o:depends({ [option_name("protocol")] = "_shunt" })
 
 		if #nodes_table > 0 then
+			for k, v in pairs(socks_list) do
+				o:value(v.id, v.remark)
+			end
 			for k, v in pairs(balancers_table) do
-				o:value(v.id, v.remarks)
+				o:value(v.id, v.remark)
 			end
 			for k, v in pairs(iface_table) do
-				o:value(v.id, v.remarks)
+				o:value(v.id, v.remark)
 			end
 			local pt = s:option(ListValue, option_name(e[".name"] .. "_proxy_tag"), string.format('* <a style="color:red">%s</a>', e.remarks .. " " .. translate("Preproxy")))
 			pt:value("nil", translate("Close"))
 			pt:value("main", translate("Preproxy Node"))
 			pt.default = "nil"
 			for k, v in pairs(nodes_table) do
-				o:value(v.id, v.remarks)
+				o:value(v.id, v.remark)
 				pt:depends({ [option_name("protocol")] = "_shunt", [option_name("preproxy_enabled")] = true, [option_name(e[".name"])] = v.id })
 			end
 		end
@@ -151,24 +221,27 @@ o.cfgvalue = function(t, n)
 end
 o:depends({ [option_name("protocol")] = "_shunt" })
 
-local o = s:option(Value, option_name("default_node"), string.format('* <a style="color:red">%s</a>', translate("Default")))
+local o = s:option(ListValue, option_name("default_node"), string.format('* <a style="color:red">%s</a>', translate("Default")))
 o:depends({ [option_name("protocol")] = "_shunt" })
 o:value("_direct", translate("Direct Connection"))
 o:value("_blackhole", translate("Blackhole"))
 
 if #nodes_table > 0 then
+	for k, v in pairs(socks_list) do
+		o:value(v.id, v.remark)
+	end
 	for k, v in pairs(balancers_table) do
-		o:value(v.id, v.remarks)
+		o:value(v.id, v.remark)
 	end
 	for k, v in pairs(iface_table) do
-		o:value(v.id, v.remarks)
+		o:value(v.id, v.remark)
 	end
 	local dpt = s:option(ListValue, option_name("default_proxy_tag"), string.format('* <a style="color:red">%s</a>', translate("Default Preproxy")), translate("When using, localhost will connect this node first and then use this node to connect the default node."))
 	dpt:value("nil", translate("Close"))
 	dpt:value("main", translate("Preproxy Node"))
 	dpt.default = "nil"
 	for k, v in pairs(nodes_table) do
-		o:value(v.id, v.remarks)
+		o:value(v.id, v.remark)
 		dpt:depends({ [option_name("protocol")] = "_shunt", [option_name("preproxy_enabled")] = true, [option_name("default_node")] = v.id })
 	end
 end
@@ -226,21 +299,19 @@ o.default = "none"
 o:value("none")
 o:depends({ [option_name("protocol")] = "vless" })
 
-o = s:option(ListValue, option_name("x_ss_encrypt_method"), translate("Encrypt Method"))
+o = s:option(ListValue, option_name("ss_method"), translate("Encrypt Method"))
 o.rewrite_option = "method"
-for a, t in ipairs(x_ss_encrypt_method_list) do o:value(t) end
+for a, t in ipairs(ss_method_list) do o:value(t) end
 o:depends({ [option_name("protocol")] = "shadowsocks" })
 
 o = s:option(Flag, option_name("iv_check"), translate("IV Check"))
-o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("x_ss_encrypt_method")] = "aes-128-gcm" })
-o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("x_ss_encrypt_method")] = "aes-256-gcm" })
-o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("x_ss_encrypt_method")] = "chacha20-poly1305" })
-o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("x_ss_encrypt_method")] = "xchacha20-poly1305" })
+o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("ss_method")] = "aes-128-gcm" })
+o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("ss_method")] = "aes-256-gcm" })
+o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("ss_method")] = "chacha20-poly1305" })
+o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("ss_method")] = "xchacha20-poly1305" })
 
-o = s:option(Flag, option_name("uot"), translate("UDP over TCP"), translate("Need Xray-core or sing-box as server side."))
-o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("x_ss_encrypt_method")] = "2022-blake3-aes-128-gcm" })
-o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("x_ss_encrypt_method")] = "2022-blake3-aes-256-gcm" })
-o:depends({ [option_name("protocol")] = "shadowsocks", [option_name("x_ss_encrypt_method")] = "2022-blake3-chacha20-poly1305" })
+o = s:option(Flag, option_name("uot"), translate("UDP over TCP"))
+o:depends({ [option_name("protocol")] = "shadowsocks" })
 
 o = s:option(Value, option_name("uuid"), translate("ID"))
 o.password = true
@@ -251,28 +322,33 @@ o = s:option(ListValue, option_name("flow"), translate("flow"))
 o.default = ""
 o:value("", translate("Disable"))
 o:value("xtls-rprx-vision")
-o:depends({ [option_name("protocol")] = "vless", [option_name("tls")] = true, [option_name("transport")] = "tcp" })
+o:depends({ [option_name("protocol")] = "vless", [option_name("tls")] = true, [option_name("transport")] = "raw" })
 
 o = s:option(Flag, option_name("tls"), translate("TLS"))
 o.default = 0
 o:depends({ [option_name("protocol")] = "vmess" })
 o:depends({ [option_name("protocol")] = "vless" })
+o:depends({ [option_name("protocol")] = "http" })
 o:depends({ [option_name("protocol")] = "socks" })
 o:depends({ [option_name("protocol")] = "trojan" })
 o:depends({ [option_name("protocol")] = "shadowsocks" })
 
 o = s:option(Flag, option_name("reality"), translate("REALITY"), translate("Only recommend to use with VLESS-TCP-XTLS-Vision."))
 o.default = 0
-o:depends({ [option_name("tls")] = true, [option_name("transport")] = "tcp" })
+o:depends({ [option_name("tls")] = true, [option_name("transport")] = "raw" })
 o:depends({ [option_name("tls")] = true, [option_name("transport")] = "h2" })
 o:depends({ [option_name("tls")] = true, [option_name("transport")] = "grpc" })
+o:depends({ [option_name("tls")] = true, [option_name("transport")] = "xhttp" })
 
 o = s:option(ListValue, option_name("alpn"), translate("alpn"))
 o.default = "default"
 o:value("default", translate("Default"))
-o:value("h2,http/1.1")
+o:value("h3")
 o:value("h2")
+o:value("h3,h2")
 o:value("http/1.1")
+o:value("h2,http/1.1")
+o:value("h3,h2,http/1.1")
 o:depends({ [option_name("tls")] = true, [option_name("reality")] = false })
 
 -- o = s:option(Value, option_name("minversion"), translate("minversion"))
@@ -318,26 +394,20 @@ o:depends({ [option_name("tls")] = true, [option_name("utls")] = true })
 o:depends({ [option_name("tls")] = true, [option_name("reality")] = true })
 
 o = s:option(ListValue, option_name("transport"), translate("Transport"))
-o:value("tcp", "TCP")
+o:value("raw", "RAW (TCP)")
 o:value("mkcp", "mKCP")
 o:value("ws", "WebSocket")
 o:value("h2", "HTTP/2")
 o:value("ds", "DomainSocket")
 o:value("quic", "QUIC")
 o:value("grpc", "gRPC")
+o:value("httpupgrade", "HttpUpgrade")
+o:value("xhttp", "XHTTP (SplitHTTP)")
 o:depends({ [option_name("protocol")] = "vmess" })
 o:depends({ [option_name("protocol")] = "vless" })
 o:depends({ [option_name("protocol")] = "socks" })
 o:depends({ [option_name("protocol")] = "shadowsocks" })
 o:depends({ [option_name("protocol")] = "trojan" })
-
---[[
-o = s:option(ListValue, option_name("ss_transport"), translate("Transport"))
-o:value("ws", "WebSocket")
-o:value("h2", "HTTP/2")
-o:value("h2+ws", "HTTP/2 & WebSocket")
-o:depends({ [option_name("protocol")] = "shadowsocks" })
-]]--
 
 o = s:option(Value, option_name("wireguard_public_key"), translate("Public Key"))
 o:depends({ [option_name("protocol")] = "wireguard" })
@@ -355,7 +425,7 @@ o = s:option(Value, option_name("wireguard_mtu"), translate("MTU"))
 o.default = "1420"
 o:depends({ [option_name("protocol")] = "wireguard" })
 
-if api.compare_versions(api.get_app_version("xray"), ">=", "1.8.0") then
+if api.compare_versions(xray_version, ">=", "1.8.0") then
 	o = s:option(Value, option_name("wireguard_reserved"), translate("Reserved"), translate("Decimal numbers separated by \",\" or Base64-encoded strings."))
 	o:depends({ [option_name("protocol")] = "wireguard" })
 end
@@ -364,13 +434,13 @@ o = s:option(Value, option_name("wireguard_keepAlive"), translate("Keep Alive"))
 o.default = "0"
 o:depends({ [option_name("protocol")] = "wireguard" })
 
--- [[ TCP部分 ]]--
+-- [[ RAW部分 ]]--
 
 -- TCP伪装
 o = s:option(ListValue, option_name("tcp_guise"), translate("Camouflage Type"))
 o:value("none", "none")
 o:value("http", "http")
-o:depends({ [option_name("transport")] = "tcp" })
+o:depends({ [option_name("transport")] = "raw" })
 
 -- HTTP域名
 o = s:option(DynamicList, option_name("tcp_guise_http_host"), translate("HTTP Host"))
@@ -420,22 +490,22 @@ o:depends({ [option_name("transport")] = "mkcp" })
 -- [[ WebSocket部分 ]]--
 o = s:option(Value, option_name("ws_host"), translate("WebSocket Host"))
 o:depends({ [option_name("transport")] = "ws" })
-o:depends({ [option_name("ss_transport")] = "ws" })
 
 o = s:option(Value, option_name("ws_path"), translate("WebSocket Path"))
 o.placeholder = "/"
 o:depends({ [option_name("transport")] = "ws" })
-o:depends({ [option_name("ss_transport")] = "ws" })
+
+o = s:option(Value, option_name("ws_heartbeatPeriod"), translate("HeartbeatPeriod(second)"))
+o.datatype = "integer"
+o:depends({ [option_name("transport")] = "ws" })
 
 -- [[ HTTP/2部分 ]]--
 o = s:option(Value, option_name("h2_host"), translate("HTTP/2 Host"))
 o:depends({ [option_name("transport")] = "h2" })
-o:depends({ [option_name("ss_transport")] = "h2" })
 
 o = s:option(Value, option_name("h2_path"), translate("HTTP/2 Path"))
 o.placeholder = "/"
 o:depends({ [option_name("transport")] = "h2" })
-o:depends({ [option_name("ss_transport")] = "h2" })
 
 o = s:option(Flag, option_name("h2_health_check"), translate("Health check"))
 o:depends({ [option_name("transport")] = "h2" })
@@ -494,8 +564,61 @@ o = s:option(Value, option_name("grpc_initial_windows_size"), translate("Initial
 o.default = "0"
 o:depends({ [option_name("transport")] = "grpc" })
 
--- [[ Mux ]]--
-o = s:option(Flag, option_name("mux"), translate("Mux"))
+-- [[ HttpUpgrade部分 ]]--
+o = s:option(Value, option_name("httpupgrade_host"), translate("HttpUpgrade Host"))
+o:depends({ [option_name("transport")] = "httpupgrade" })
+
+o = s:option(Value, option_name("httpupgrade_path"), translate("HttpUpgrade Path"))
+o.placeholder = "/"
+o:depends({ [option_name("transport")] = "httpupgrade" })
+
+-- [[ XHTTP部分 ]]--
+o = s:option(ListValue, option_name("xhttp_mode"), "XHTTP " .. translate("Mode"))
+o:depends({ [option_name("transport")] = "xhttp" })
+o.default = "auto"
+o:value("auto")
+o:value("packet-up")
+o:value("stream-up")
+o:value("stream-one")
+
+o = s:option(Value, option_name("xhttp_host"), translate("XHTTP Host"))
+o:depends({ [option_name("transport")] = "xhttp" })
+
+o = s:option(Value, option_name("xhttp_path"), translate("XHTTP Path"))
+o.placeholder = "/"
+o:depends({ [option_name("transport")] = "xhttp" })
+
+o = s:option(TextValue, option_name("xhttp_extra"), translate("XHTTP Extra"), translate("An <a target='_blank' href='https://xtls.github.io/config/transports/splithttp.html#extra'>XHTTP extra object</a> in raw json"))
+o:depends({ [option_name("transport")] = "xhttp" })
+o.rows = 15
+o.wrap = "off"
+o.custom_write = function(self, section, value)
+
+	m:set(section, self.option:sub(1 + #option_prefix), value)
+
+	local success, data = pcall(jsonc.parse, value)
+	if success and data then
+		local address = (data.extra and data.extra.downloadSettings and data.extra.downloadSettings.address)
+			or (data.downloadSettings and data.downloadSettings.address)
+		if address and address ~= "" then
+			m:set(section, "download_address", address)
+		else
+			m:del(section, "download_address")
+		end
+	else
+		m:del(section, "download_address")
+	end
+end
+o.validate = function(self, value)
+	value = value:gsub("\r\n", "\n"):gsub("^[ \t]*\n", ""):gsub("\n[ \t]*$", ""):gsub("\n[ \t]*\n", "\n")
+	if value:sub(-1) == "\n" then
+		value = value:sub(1, -2)
+	end
+	return value
+end
+
+-- [[ Mux.Cool ]]--
+o = s:option(Flag, option_name("mux"), "Mux", translate("Enable Mux.Cool"))
 o:depends({ [option_name("protocol")] = "vmess" })
 o:depends({ [option_name("protocol")] = "vless", [option_name("flow")] = "" })
 o:depends({ [option_name("protocol")] = "http" })
@@ -508,12 +631,36 @@ o.default = 8
 o:depends({ [option_name("mux")] = true })
 
 -- [[ XUDP Mux ]]--
-o = s:option(Flag, option_name("xmux"), translate("xMux"))
+o = s:option(Flag, option_name("xmux"), "XUDP Mux")
 o.default = 1
 o:depends({ [option_name("protocol")] = "vless", [option_name("flow")] = "xtls-rprx-vision" })
 
 o = s:option(Value, option_name("xudp_concurrency"), translate("XUDP Mux concurrency"))
 o.default = 8
 o:depends({ [option_name("xmux")] = true })
+
+--[[tcpMptcp]]
+o = s:option(Flag, option_name("tcpMptcp"), "tcpMptcp", translate("Enable Multipath TCP, need to be enabled in both server and client configuration."))
+o.default = 0
+
+o = s:option(Flag, option_name("tcpNoDelay"), "tcpNoDelay")
+o.default = 0
+
+o = s:option(ListValue, option_name("to_node"), translate("Landing node"), translate("Only support a layer of proxy."))
+o.default = ""
+o:value("", translate("Close(Not use)"))
+for k, v in pairs(nodes_table) do
+	if v.type == "Xray" then
+		o:value(v.id, v.remark)
+	end
+end
+
+for i, v in ipairs(s.fields[option_name("protocol")].keylist) do
+	if not v:find("_") then
+		s.fields[option_name("tcpMptcp")]:depends({ [option_name("protocol")] = v })
+		s.fields[option_name("tcpNoDelay")]:depends({ [option_name("protocol")] = v })
+		s.fields[option_name("to_node")]:depends({ [option_name("protocol")] = v })
+	end
+end
 
 api.luci_types(arg[1], m, s, type_name, option_prefix)
