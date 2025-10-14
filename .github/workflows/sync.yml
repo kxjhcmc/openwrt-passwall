@@ -8,9 +8,9 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions: # 确保这里有一个冒号，并且它是正确的父级
-      contents: write # 确保这里正确缩进，是 permissions 的子项
-      workflows: write # 确保这里正确缩进，是 permissions 的子项，与 contents 同级
+    permissions: 
+      contents: write
+       workflows: write 
 
     steps:
       - uses: actions/checkout@v4
