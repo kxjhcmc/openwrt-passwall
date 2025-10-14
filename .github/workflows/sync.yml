@@ -2,46 +2,40 @@ name: Force Sync Fork with Upstream
 
 on:
   schedule:
-    - cron: '0 3 * * *' # 每天 UTC 时间 03:00 运行
-  workflow_dispatch: # 允许手动触发
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # 添加以下 permissions 配置来授予必要的权限
-    permissions:
-      contents: write # 允许 GITHUB_TOKEN 推送内容到仓库
-      workflows: write # 允许 GITHUB_TOKEN 创建、更新或删除工作流文件
+    permissions: # 确保这里有一个冒号，并且它是正确的父级
+      contents: write # 确保这里正确缩进，是 permissions 的子项
+      workflows: write # 确保这里正确缩进，是 permissions 的子项，与 contents 同级
 
     steps:
-      - uses: actions/checkout@v4 # 检出仓库代码
+      - uses: actions/checkout@v4
 
-      - name: Configure Git # 配置 Git 用户信息
+      - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Add upstream and fetch # 添加上游仓库并抓取更新
+      - name: Add upstream and fetch
         run: |
           git remote add upstream https://github.com/xiaorouji/openwrt-passwall.git
           git fetch upstream
 
-      - name: Force reset to upstream/main # 强制将本地 main 分支重置为上游 main 分支
+      - name: Force reset to upstream/main
         run: |
           git checkout main
           git reset --hard upstream/main
 
-      - name: Restore sync.yml # 从原始的 origin/main 恢复 sync.yml 文件
+      - name: Restore sync.yml
         run: |
-          # 这一步是为了确保 .github/workflows/sync.yml 文件是您 fork 仓库中最新的版本，
-          # 而不是被 upstream 的版本覆盖掉。
-          # 'origin/main' 指的是在执行 checkout@v4 时，您自己仓库的 main 分支状态。
           git checkout origin/main -- .github/workflows/sync.yml || echo "No sync.yml to restore"
           git add .github/workflows/sync.yml
-          git commit -m "Restore sync.yml after sync" || echo "No changes to commit" # 如果没有变化则不报错
+          git commit -m "Restore sync.yml after sync" || echo "No changes to commit"
 
-      - name: Push force to origin # 强制推送所有更改到您的 fork 仓库
-        # GITHUB_TOKEN 会自动被用于 Git 操作，
-        # 且在 job 级别设置的权限会对其生效。
+      - name: Push force to origin
         run: |
           git push origin main --force
