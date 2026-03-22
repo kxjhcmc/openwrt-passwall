@@ -1840,6 +1840,12 @@ msgstr "ECH 查询策略"
 msgid "Controls the policy used when performing DNS queries for ECH configuration."
 msgstr "控制使用 DNS 查询 ECH 配置时的策略。"
 
+msgid "ECH Query Domain"
+msgstr "ECH 查询域名"
+
+msgid "Overrides the domain name used for ECH HTTPS record queries."
+msgstr "覆盖用于 ECH HTTPS 记录查询的域名。"
+
 msgid "Enable Multipath TCP, need to be enabled in both server and client configuration."
 msgstr "启用 Multipath TCP，需在服务端和客户端配置中同时启用。"
 
@@ -1870,12 +1876,6 @@ msgstr "分片间隔"
 msgid "Fragmentation interval (ms)"
 msgstr "分片间隔（ms）"
 
-msgid "Max Split"
-msgstr "最大分片数"
-
-msgid "Limit the maximum number of splits."
-msgstr "限制分片的最大数量。"
-
 msgid "Split handshake data into multiple TLS records for better censorship evasion. Low overhead. Recommended to enable first."
 msgstr "将握手数据拆分为多个 TLS 记录，提升抗封锁能力，几乎不增加延迟，建议优先启用。"
 
@@ -1899,9 +1899,6 @@ msgstr "数据包"
 
 msgid "Delay (ms)"
 msgstr "延迟（ms）"
-
-msgid "IP Type"
-msgstr "IP 类型"
 
 msgid "If is domain name, The requested domain name will be resolved to IP before connect."
 msgstr "如果是域名，域名将在请求发出之前解析为 IP。"
